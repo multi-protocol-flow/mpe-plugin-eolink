@@ -6,31 +6,27 @@
 
 ---
 
-## 0. Environment & Runtime Prerequisites
+## 0. Runtime Environment & Prerequisites
 
-This plugin is written in **Python 3**. Please review the runtime environment requirements below:
+### 1. End Users (Installed via MPE Plugin Marketplace)
+- **Zero Runtime Dependencies**: The official release artifacts (Windows, Linux, macOS) are automatically compiled into standalone native executables (`eolink.exe` on Windows, `eolink` on Linux/macOS) via PyInstaller in CI.
+- **Out of the Box**: Users **do not need to have Python installed or configured in system PATH**. The host process manages the lifecycle and executes the binary directly.
 
-### 1. Python Version
-- **Minimum Required**: Python 3.8+ (tested and verified on Python 3.8 / 3.9 / 3.10 / 3.11 / 3.12 / 3.13).
-
-### 2. Zero External Dependencies (No `pip install` needed)
-- The plugin is developed **exclusively using the Python standard library** (`urllib.request`, `json`, `argparse`, `sys`, `typing`, etc.).
-- **No third-party packages or virtual environment setups are required**. It works out of the box.
-
-### 3. System PATH Configuration & Launch Command
-- The plugin manifest `plugin.json` specifies the entry command:
-  ```json
-  "entry": { "command": "python3", "args": ["./eolink.py"] }
+### 2. Developers (Source Development & Debugging)
+- **Python Version**: Python 3.8+ (tested on Python 3.8 / 3.9 / 3.10 / 3.11 / 3.12 / 3.13).
+- **Zero External Dependencies (No `pip install` required)**: Developed purely with Python standard libraries (`urllib.request`, `json`, `argparse`, `sys`, `typing`, etc.).
+- **Building Local Standalone Binaries (Optional)**:
+  ```bash
+  pip install pyinstaller
+  pyinstaller --onefile --name eolink eolink.py
   ```
-- **Linux / macOS**: Ensure Python 3 is installed and accessible via `python3` in your system `PATH` (verify using `which python3`).
-- **Windows**: Ensure Python 3 is installed with **"Add python.exe to PATH"** enabled, and that the `python3` command (or alias) is executable.
 
 ---
 
 ## 1. Architecture & Workflow
 
 ```
-Host (mpe / mpe-cli)                    Plugin process (eolink.py)
+Host (mpe / mpe-cli)                    Plugin process (eolink / eolink.exe)
    │  scans plugins/ directory                 │
    │  ── describe ───────────────────────────► │  Returns datasource spec & config schema
    │  ◄─────────── datasource spec ─────────── │
@@ -53,11 +49,11 @@ Host (mpe / mpe-cli)                    Plugin process (eolink.py)
 ```
 mpe-plugin-eolink/
 ├── eolink.py                 # Plugin core logic (JSON-RPC loop + Apikit client + template converter + self-test)
-├── plugin.json               # Plugin manifest (entry, kind, capabilities, min_host_version)
+├── plugin.json               # Plugin manifest (entry: ./eolink, kind, capabilities, min_host_version)
 ├── .gitignore                # Git ignore rules (Python cache, venv, build artifacts)
 ├── .github/
 │   └── workflows/
-│       └── ci.yml            # CI test + multi-platform zip packaging + Release + Registry sync
+│       └── ci.yml            # CI test + PyInstaller cross-platform build + Release + Registry sync
 ├── README.md                 # Documentation in Chinese (default)
 └── README_EN.md              # Documentation in English
 ```
@@ -97,7 +93,11 @@ The following parameters can be configured in the MPE datasource settings:
 The plugin includes a built-in Mock self-test suite covering `describe`, `validate_config`, `browse`, `get_item`, and `get_templates`:
 
 ```bash
+# Run from source
 python3 eolink.py --self-test
+
+# Or run compiled binary
+./dist/eolink --self-test
 ```
 
 Example Output:
@@ -127,8 +127,9 @@ Send a JSON-RPC request line:
 
 ## 6. Build & Release Workflow
 
-When pushing a version tag (e.g. `v0.1.0`) to this repository, GitHub Actions will automatically:
+When pushing a version tag (e.g. `v0.1.1`) to this repository, GitHub Actions will automatically:
 1. Run `eolink.py --self-test`;
-2. Package release bundles for target platforms (`eolink-<version>-<platform>.zip` with `.sha256` digests);
-3. Create a GitHub Release;
-4. Trigger the `multi-protocol-flow/mpe-plugin-registry` repository workflow to automatically synchronize the marketplace index.
+2. Compile standalone native binaries across platforms (Ubuntu, Windows, macOS) using PyInstaller;
+3. Package release bundles (`eolink-<version>-<platform>.zip` with `.sha256` digests);
+4. Create a GitHub Release;
+5. Trigger the `multi-protocol-flow/mpe-plugin-registry` repository workflow to automatically synchronize the marketplace index.

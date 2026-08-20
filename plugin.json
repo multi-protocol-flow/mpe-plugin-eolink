@@ -4,6 +4,6 @@
   "kind": "datasource",
   "description": "Eolink 数据源（只读浏览 + 拖拽导入）",
   "min_host_version": "0.1.0",
-  "entry": { "command": "python3", "args": ["./eolink.py"] },
+  "entry": { "command": "./eolink" },
   "capabilities": { "streaming": false }
 }

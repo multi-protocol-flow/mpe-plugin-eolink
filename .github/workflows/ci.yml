@@ -24,22 +24,24 @@ jobs:
         run: python3 eolink.py --self-test
 
   build:
-    name: package-${{ matrix.artifact_os }}
+    name: build-${{ matrix.artifact_os }}
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { artifact_os: linux-x64 }
-          - { artifact_os: windows-x64 }
-          - { artifact_os: macos-x64 }
+          - { os: ubuntu-22.04, artifact_os: linux-x64, bin: eolink }
+          - { os: windows-latest, artifact_os: windows-x64, bin: eolink.exe }
+          - { os: macos-latest, artifact_os: macos-x64, bin: eolink }
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+      - name: Install PyInstaller
+        run: pip install pyinstaller
       - name: Compute version
         id: version
         shell: bash
@@ -63,21 +65,28 @@ jobs:
               json.dump(data, f, ensure_ascii=False, indent=2)
               f.write("\n")
           EOF
+      - name: Build standalone binary via PyInstaller
+        run: pyinstaller --onefile --name eolink eolink.py
+      - name: Test compiled binary
+        shell: bash
+        run: |
+          ./dist/${{ matrix.bin }} --self-test
       - name: Package zip + sha256
         shell: bash
         run: |
           VERSION=${{ steps.version.outputs.value }}
-          mkdir -p dist/eolink
-          cp plugin.json dist/eolink/
-          cp eolink.py dist/eolink/
-          python3 - "$VERSION" "${{ matrix.artifact_os }}" <<'EOF'
+          mkdir -p pkg/eolink
+          cp plugin.json pkg/eolink/
+          cp dist/${{ matrix.bin }} pkg/eolink/
+          python3 - "$VERSION" "${{ matrix.artifact_os }}" "${{ matrix.bin }}" <<'EOF'
           import hashlib, os, sys, zipfile
-          version, artifact_os = sys.argv[1], sys.argv[2]
-          os.chmod("dist/eolink/eolink.py", 0o755)
+          version, artifact_os, bin_name = sys.argv[1], sys.argv[2], sys.argv[3]
+          if artifact_os != "windows-x64":
+              os.chmod(f"pkg/eolink/{bin_name}", 0o755)
           name = f"eolink-{version}-{artifact_os}.zip"
           with zipfile.ZipFile(name, "w", zipfile.ZIP_DEFLATED) as z:
-              for f in ("plugin.json", "eolink.py"):
-                  z.write(f"dist/eolink/{f}", f"eolink/{f}")
+              for f in ("plugin.json", bin_name):
+                  z.write(f"pkg/eolink/{f}", f"eolink/{f}")
           digest = hashlib.sha256(open(name, "rb").read()).hexdigest()
           open(f"{name}.sha256", "w").write(f"{digest}  {name}\n")
           EOF
@@ -97,11 +106,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          path: dist
+          path: dist-release
           merge-multiple: true
       - uses: softprops/action-gh-release@v3.0.2
         with:
-          files: dist/*
+          files: dist-release/*
       - name: Trigger registry sync
         if: env.GH_TOKEN != ''
         env:

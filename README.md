@@ -6,31 +6,27 @@
 
 ---
 
-## 0. 环境要求与运行环境说明
+## 0. 运行环境与安装说明
 
-由于本插件采用 **Python 3** 编写，使用前请了解以下运行环境要求：
+### 1. 最终用户（通过 MPE 插件市场安装）
+- **零环境依赖**：官方分发包（Windows / Linux / macOS）已通过 CI 自动打包为独立的免环境可执行二进制文件（Windows 上为 `eolink.exe`，Linux/macOS 上为 `eolink`）。
+- **开箱即用**：用户的操作系统**无需预先安装 Python 或配置任何环境变量**，由 MPE 宿主管理生命周期并直接拉起运行。
 
-### 1. Python 版本要求
-- **最低版本**：Python 3.8+（已在 Python 3.8 / 3.9 / 3.10 / 3.11 / 3.12 / 3.13 环境下测试通过）。
-
-### 2. 零外部依赖（无需 `pip install`）
-- 本插件**完全基于 Python 标准库**开发（仅使用 `urllib.request`、`json`、`argparse`、`sys`、`typing` 等标准模块）。
-- **不需要任何第三方依赖包**，无需配置虚拟环境或安装任何 requirements.txt，真正开箱即用。
-
-### 3. 系统 PATH 配置与启动命令
-- 插件的元数据文件 `plugin.json` 声明了启动入口：
-  ```json
-  "entry": { "command": "python3", "args": ["./eolink.py"] }
+### 2. 开发者（本地从源码开发与测试）
+- **Python 版本要求**：Python 3.8+（已在 Python 3.8 / 3.9 / 3.10 / 3.11 / 3.12 / 3.13 环境下测试通过）。
+- **零外部依赖（无需 `pip install`）**：本插件完全基于 Python 标准库开发（仅使用 `urllib.request`、`json`、`argparse`、`sys`、`typing` 等标准模块），无需安装任何第三方 pip 包。
+- **本地构建独立二进制（可选）**：如需本地编译二进制产物，只需安装 `pyinstaller`：
+  ```bash
+  pip install pyinstaller
+  pyinstaller --onefile --name eolink eolink.py
   ```
-- **Linux / macOS**：请确保系统已安装 Python 3，并在全局 PATH 中可通过 `python3` 命令执行（可运行 `which python3` 确认）。
-- **Windows**：请确保已安装 Python 3，且在安装时勾选了 **"Add python.exe to PATH"**；如果系统中仅有 `python.exe`，可设置别名或确保 `python3` 命令可用。
 
 ---
 
 ## 1. 架构与工作方式
 
 ```
-Host (mpe / mpe-cli)                    Plugin process (eolink.py)
+Host (mpe / mpe-cli)                    Plugin process (eolink / eolink.exe)
    │  扫描 plugins/ 目录                       │
    │  ── describe ───────────────────────────► │  返回数据源描述与配置项 schema
    │  ◄─────────── datasource spec ─────────── │
@@ -53,11 +49,11 @@ Host (mpe / mpe-cli)                    Plugin process (eolink.py)
 ```
 mpe-plugin-eolink/
 ├── eolink.py                 # 插件主逻辑（JSON-RPC 循环 + Apikit 客户端 + 节点模板转换器 + 自测套件）
-├── plugin.json               # 插件清单文件（声明 entry、kind、capabilities 等）
+├── plugin.json               # 插件清单文件（声明 entry 为 ./eolink、kind、capabilities 等）
 ├── .gitignore                # Git 忽略配置（忽略 Python 缓存、虚拟环境、打包产物）
 ├── .github/
 │   └── workflows/
-│       └── ci.yml            # CI 自动化自测 + 跨平台 zip 打包 + Release 发布 + Registry 同步
+│       └── ci.yml            # CI 自动化自测 + PyInstaller 跨平台二进制打包 + Release 发布 + Registry 同步
 ├── README.md                 # 中文说明文档（默认）
 └── README_EN.md              # 英文说明文档
 ```
@@ -97,7 +93,11 @@ mpe-plugin-eolink/
 插件内置了完整的 Mock 离线自测套件，覆盖 `describe`、`validate_config`、`browse`、`get_item`、`get_templates` 等全流程：
 
 ```bash
+# 从源码运行
 python3 eolink.py --self-test
+
+# 或运行编译后的二进制
+./dist/eolink --self-test
 ```
 
 输出示例：
@@ -127,8 +127,9 @@ python3 eolink.py
 
 ## 6. 构建与发布
 
-当向本仓库推送 `v*` 标签（例如 `v0.1.0`）时，GitHub Actions 会自动：
-1. 运行 `eolink.py --self-test` 自测；
-2. 为各平台打包分发包（`eolink-<version>-<platform>.zip` 及 `.sha256` 校验和）；
-3. 发布 GitHub Release；
-4. 自动触发 `multi-protocol-flow/mpe-plugin-registry` 仓库的工作流，完成官方插件市场注册表的同步与收录。
+当向本仓库推送 `v*` 标签（例如 `v0.1.1`）时，GitHub Actions 会自动：
+1. 运行 `eolink.py --self-test` 自动化离线测试；
+2. 在 Ubuntu、Windows、macOS 矩阵 Runner 上使用 PyInstaller 编译为原生二进制文件；
+3. 打包各平台独立分发包（`eolink-<version>-<platform>.zip` 及 `.sha256` 校验和）；
+4. 发布 GitHub Release；
+5. 自动触发 `multi-protocol-flow/mpe-plugin-registry` 仓库工作流，完成官方插件市场注册表的同步与更新。
