@@ -103,12 +103,12 @@ python3 eolink.py --self-test
 输出示例：
 ```
 [Self-Test] Starting Eolink datasource plugin self-test...
-  ✓ describe test passed
-  ✓ validate_config (empty) test passed
-  ✓ browse(project) Apikit v3 test passed
-  ✓ browse(api) Apikit v3 test passed
-  ✓ get_item Apikit v3 test passed
-  ✓ get_templates (convert_api_to_template) Apikit v3 test passed
+  [PASS] describe test passed
+  [PASS] validate_config (empty) test passed
+  [PASS] browse(project) Apikit v3 test passed
+  [PASS] browse(api) Apikit v3 test passed
+  [PASS] get_item Apikit v3 test passed
+  [PASS] get_templates (convert_api_to_template) Apikit v3 test passed
 
 [Self-Test] Result: PASS
 ```

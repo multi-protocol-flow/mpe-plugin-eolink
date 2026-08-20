@@ -21,6 +21,13 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+# Ensure UTF-8 encoding across Windows, Linux and macOS
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stdin, "reconfigure"):
+    sys.stdin.reconfigure(encoding="utf-8", errors="replace")
 DEFAULT_EOLINK_BASE = "http://uat.apikit.com/index.php"
 
 # Apikit api_request_type 整数枚举映射
@@ -774,9 +781,9 @@ def run_self_test() -> int:
         assert len(desc["datasources"]) == 1
         assert desc["datasources"][0]["id"] == "eolink"
         assert len(desc["datasources"][0]["resources"]) == 2
-        print("  ✓ describe test passed")
+        print("  [PASS] describe test passed")
     except Exception as e:
-        print(f"  ✗ describe test failed: {e}")
+        print(f"  [FAIL] describe test failed: {e}")
         passed = False
 
     # 2. Test validate_config (empty api_key failure)
@@ -784,9 +791,9 @@ def run_self_test() -> int:
         res = handle_validate_config({})
         assert res["valid"] is False
         assert res["message"] is not None
-        print("  ✓ validate_config (empty) test passed")
+        print("  [PASS] validate_config (empty) test passed")
     except Exception as e:
-        print(f"  ✗ validate_config test failed: {e}")
+        print(f"  [FAIL] validate_config test failed: {e}")
         passed = False
 
     # 3. Test mock data mapping for Apikit v3
@@ -863,9 +870,9 @@ def run_self_test() -> int:
         assert len(projects) == 1
         assert projects[0]["id"] == "proj_1001"
         assert projects[0]["name"] == "用户中心"
-        print("  ✓ browse(project) Apikit v3 test passed")
+        print("  [PASS] browse(project) Apikit v3 test passed")
     except Exception as e:
-        print(f"  ✗ browse(project) Apikit v3 test failed: {e}")
+        print(f"  [FAIL] browse(project) Apikit v3 test failed: {e}")
         passed = False
 
     # Test browse apis with api_request_type
@@ -878,9 +885,9 @@ def run_self_test() -> int:
         assert apis[0]["protocol"] == "http"
         assert apis[0]["method"] == "GET"
         assert apis[0]["path"] == "http://172.18.65.54:8099/users/1"
-        print("  ✓ browse(api) Apikit v3 test passed")
+        print("  [PASS] browse(api) Apikit v3 test passed")
     except Exception as e:
-        print(f"  ✗ browse(api) Apikit v3 test failed: {e}")
+        print(f"  [FAIL] browse(api) Apikit v3 test failed: {e}")
         passed = False
 
     # Test get_item
@@ -889,9 +896,9 @@ def run_self_test() -> int:
         assert detail["name"] == "获取用户信息"
         assert detail["method"] == "POST"
         assert len(detail["extra"]) >= 2
-        print("  ✓ get_item Apikit v3 test passed")
+        print("  [PASS] get_item Apikit v3 test passed")
     except Exception as e:
-        print(f"  ✗ get_item Apikit v3 test failed: {e}")
+        print(f"  [FAIL] get_item Apikit v3 test failed: {e}")
         passed = False
 
     # Test get_templates
@@ -928,9 +935,9 @@ def run_self_test() -> int:
         assert form_tpl["data"]["form_fields"][0]["field_type"] == "text"
         assert form_tpl["data"]["form_fields"][1]["field_type"] == "file"
 
-        print("  ✓ get_templates (convert_api_to_template) Apikit v3 test passed")
+        print("  [PASS] get_templates (convert_api_to_template) Apikit v3 test passed")
     except Exception as e:
-        print(f"  ✗ get_templates test failed: {e}")
+        print(f"  [FAIL] get_templates test failed: {e}")
         passed = False
 
     if passed:
