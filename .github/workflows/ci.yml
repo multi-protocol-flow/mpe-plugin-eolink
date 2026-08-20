@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: test (self-test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Run offline self-test
+        run: python3 eolink.py --self-test
+
+  build:
+    name: package-${{ matrix.artifact_os }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { artifact_os: linux-x64 }
+          - { artifact_os: windows-x64 }
+          - { artifact_os: macos-x64 }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Inject version from tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          python3 - "${{ steps.version.outputs.value }}" <<'EOF'
+          import json, sys
+          version = sys.argv[1]
+          with open("plugin.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+          data["version"] = version
+          with open("plugin.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          EOF
+      - name: Package zip + sha256
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.value }}
+          mkdir -p dist/eolink
+          cp plugin.json dist/eolink/
+          cp eolink.py dist/eolink/
+          python3 - "$VERSION" "${{ matrix.artifact_os }}" <<'EOF'
+          import hashlib, os, sys, zipfile
+          version, artifact_os = sys.argv[1], sys.argv[2]
+          os.chmod("dist/eolink/eolink.py", 0o755)
+          name = f"eolink-{version}-{artifact_os}.zip"
+          with zipfile.ZipFile(name, "w", zipfile.ZIP_DEFLATED) as z:
+              for f in ("plugin.json", "eolink.py"):
+                  z.write(f"dist/eolink/{f}", f"eolink/{f}")
+          digest = hashlib.sha256(open(name, "rb").read()).hexdigest()
+          open(f"{name}.sha256", "w").write(f"{digest}  {name}\n")
+          EOF
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-${{ matrix.artifact_os }}
+          path: |
+            eolink-*.zip
+            eolink-*.zip.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3.0.2
+        with:
+          files: dist/*
+      - name: Trigger registry sync
+        if: env.GH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.MPE_REGISTRY_TOKEN }}
+        run: gh workflow run sync.yml --repo multi-protocol-flow/mpe-plugin-registry --ref main
