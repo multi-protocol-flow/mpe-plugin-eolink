@@ -15,6 +15,7 @@
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -688,6 +689,38 @@ def handle_validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return client.validate_config()
 
 
+def get_plugin_entry() -> Dict[str, Any]:
+    """返回 describe 握手使用的 entry（单一事实来源 = 同级 plugin.json）。
+
+    宿主扫描时用磁盘 plugin.json 的 entry 拉起本进程做 describe，握手后所有
+    后续拉起（browse / validate_config / execute）改用 describe 回显的 entry
+    （flow-engine-plugin/manager.rs 以回显 manifest 覆盖磁盘 manifest）。
+    因此回显必须与磁盘 entry 一致：开发态（python3 ./eolink.py）与打包态
+    （./eolink.exe）都由 plugin.json 决定，脚本不感知打包细节。
+
+    PyInstaller onefile 打包后 __file__ 指向临时解压目录，必须按
+    sys.executable 定位 plugin.json；源码运行则按 __file__ 定位。
+    """
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    manifest_path = os.path.join(base_dir, "plugin.json")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        entry = manifest.get("entry")
+        if isinstance(entry, dict) and entry.get("command"):
+            return entry
+    except Exception as e:
+        sys.stderr.write(f"eolink: cannot read {manifest_path}: {e}\n")
+    # 兜底：plugin.json 缺失/损坏时按运行方式推断（frozen → 自身二进制）
+    if getattr(sys, "frozen", False):
+        binary_name = os.path.basename(sys.executable)
+        return {"command": f"./{binary_name}", "args": []}
+    return {"command": sys.executable, "args": [os.path.abspath(__file__)]}
+
+
 def describe_result() -> Dict[str, Any]:
     return {
         "plugin": {
@@ -695,7 +728,7 @@ def describe_result() -> Dict[str, Any]:
             "version": "0.1.0",
             "kind": "datasource",
             "description": "Eolink 数据源（只读浏览 + 拖拽导入）",
-            "entry": {"command": "python3", "args": ["./eolink.py"]},
+            "entry": get_plugin_entry(),
             "capabilities": {"streaming": False},
         },
         "nodes": [],
@@ -781,6 +814,17 @@ def run_self_test() -> int:
         assert len(desc["datasources"]) == 1
         assert desc["datasources"][0]["id"] == "eolink"
         assert len(desc["datasources"][0]["resources"]) == 2
+        entry = desc["plugin"]["entry"]
+        assert entry.get("command"), "describe entry.command must be non-empty"
+        manifest_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin.json")
+        if os.path.isfile(manifest_path):
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            disk_entry = manifest.get("entry")
+            if isinstance(disk_entry, dict):
+                assert entry == disk_entry, (
+                    f"describe entry {entry} must match plugin.json entry {disk_entry}"
+                )
         print("  [PASS] describe test passed")
     except Exception as e:
         print(f"  [FAIL] describe test failed: {e}")
