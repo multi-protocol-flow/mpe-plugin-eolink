@@ -79,10 +79,19 @@ jobs:
           cp plugin.json pkg/eolink/
           cp dist/${{ matrix.bin }} pkg/eolink/
           python3 - "$VERSION" "${{ matrix.artifact_os }}" "${{ matrix.bin }}" <<'EOF'
-          import hashlib, os, sys, zipfile
+          import hashlib, json, os, sys, zipfile
           version, artifact_os, bin_name = sys.argv[1], sys.argv[2], sys.argv[3]
           if artifact_os != "windows-x64":
               os.chmod(f"pkg/eolink/{bin_name}", 0o755)
+          else:
+              # Windows: pin the entry to the explicit .exe name so the host's
+              # CreateProcess never has to guess the extension when relaunching.
+              with open("pkg/eolink/plugin.json", "r", encoding="utf-8") as f:
+                  manifest = json.load(f)
+              manifest["entry"]["command"] = "./eolink.exe"
+              with open("pkg/eolink/plugin.json", "w", encoding="utf-8") as f:
+                  json.dump(manifest, f, ensure_ascii=False, indent=2)
+                  f.write("\n")
           name = f"eolink-{version}-{artifact_os}.zip"
           with zipfile.ZipFile(name, "w", zipfile.ZIP_DEFLATED) as z:
               for f in ("plugin.json", bin_name):
