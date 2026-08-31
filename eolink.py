@@ -20,7 +20,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure UTF-8 encoding across Windows, Linux and macOS
 if hasattr(sys.stdout, "reconfigure"):
@@ -508,16 +508,220 @@ class EolinkClient:
                 "raw": item,
             })
         return result
+    def get_group_maps(self, project_id: str) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+        """获取项目接口分组映射:
+        - id_to_name: group_id -> group_name (如 "1906207" -> "系统管理")
+        - id_to_path: group_id -> full_path (如 "1906268" -> "系统管理/用户管理/租户管理")
+        - name_to_path: group_name -> full_path
+        """
+        query: Dict[str, Any] = {
+            "project_id": project_id,
+            "project_hash_key": project_id,
+            "projectHashKey": project_id,
+        }
+        if self.space_id:
+            query["space_id"] = self.space_id
+
+        child_keys = (
+            "childGroupList", "child_group_list",
+            "children", "childList", "child_list",
+            "sub_groups", "subGroups",
+            "subGroupList", "sub_group_list",
+            "groupList", "group_list",
+        )
+
+        def extract_children(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+            for k in child_keys:
+                c = node.get(k)
+                if isinstance(c, list) and c:
+                    return c
+            return []
+
+        def extract_gid_and_name(node: Dict[str, Any]) -> Tuple[Optional[str], str]:
+            gid = None
+            for k in ("group_id", "groupID", "api_group_id", "apiGroupID", "id"):
+                if node.get(k) is not None:
+                    gid = str(node[k])
+                    break
+            gname = ""
+            for k in ("group_name", "groupName", "api_group_name", "apiGroupName", "name"):
+                if node.get(k):
+                    gname = str(node[k]).strip()
+                    break
+            return gid, gname
+
+        def extract_pid(node: Dict[str, Any]) -> str:
+            for k in ("parent_group_id", "parentGroupID", "parent_id", "parentID", "parent"):
+                if node.get(k) is not None:
+                    return str(node[k])
+            return "0"
+
+        all_group_roots: List[Dict[str, Any]] = []
+
+        for endpoint in (
+            "/v3/api-management/api-groups",
+            "/v3/api-management/api-group/list",
+            "/v3/api-management/groups",
+            "/v3/api-management/group/list",
+            "/v3/api-management/api/groups",
+            "/v3/api-management/api/group/list",
+            "/v3/api-management/group/get-group-list",
+            "/api-management/api-group/get-group-list",
+            "/api-management/group/get-group-list",
+            "/api-management/group/list",
+            f"/projects/{project_id}/api-groups",
+            f"/projects/{project_id}/groups",
+            "/api-management/groups",
+            "/v3/api-management/project",
+            f"/projects/{project_id}",
+        ):
+            try:
+                res = self._request(endpoint, query=query)
+                if res and isinstance(res, (dict, list)):
+                    raw_data = res.get("data") if isinstance(res, dict) and "data" in res else res
+                    if isinstance(raw_data, list) and raw_data:
+                        all_group_roots = raw_data
+                        break
+                    elif isinstance(raw_data, dict):
+                        for lk in ("groupList", "group_list", "items", "list", "apiGroupList", "childGroupList", "groups"):
+                            sub = raw_data.get(lk)
+                            if isinstance(sub, list) and sub:
+                                all_group_roots = sub
+                                break
+                        if all_group_roots:
+                            break
+            except Exception:
+                continue
+
+        id_to_name: Dict[str, str] = {}
+        id_to_path: Dict[str, str] = {}
+        name_to_path: Dict[str, str] = {}
+
+        def traverse_tree(node: Dict[str, Any], parent_path: str = ""):
+            gid, gname = extract_gid_and_name(node)
+            if gid and gname:
+                id_to_name[gid] = gname
+            current_path = f"{parent_path}/{gname}" if parent_path and gname else (parent_path or gname)
+            if gid and current_path:
+                id_to_path[gid] = current_path
+            if gname and current_path and gname not in name_to_path:
+                name_to_path[gname] = current_path
+
+            for child in extract_children(node):
+                if isinstance(child, dict):
+                    traverse_tree(child, current_path)
+
+        for root_node in all_group_roots:
+            if isinstance(root_node, dict):
+                traverse_tree(root_node, "")
+
+        # 扁平结构关联构建
+        nodes_by_id: Dict[str, Dict[str, Any]] = {}
+        children_by_parent: Dict[str, List[str]] = {}
+        flat_root_ids: List[str] = []
+
+        for item in all_group_roots:
+            if not isinstance(item, dict):
+                continue
+            gid, gname = extract_gid_and_name(item)
+            if not gid:
+                continue
+            nodes_by_id[gid] = item
+            if gname:
+                id_to_name[gid] = gname
+            pid = extract_pid(item)
+            if pid not in children_by_parent:
+                children_by_parent[pid] = []
+            children_by_parent[pid].append(gid)
+
+        for gid, item in nodes_by_id.items():
+            pid = extract_pid(item)
+            if pid == "0" or pid == "None" or pid == "" or pid not in nodes_by_id:
+                flat_root_ids.append(gid)
+
+        def build_flat_paths(curr_id: str, parent_path: str):
+            node = nodes_by_id.get(curr_id)
+            if not node:
+                return
+            _, gname = extract_gid_and_name(node)
+            current_path = f"{parent_path}/{gname}" if parent_path and gname else (parent_path or gname)
+            if current_path:
+                id_to_path[curr_id] = current_path
+                if gname and gname not in name_to_path:
+                    name_to_path[gname] = current_path
+            for cid in children_by_parent.get(curr_id, []):
+                build_flat_paths(cid, current_path)
+
+        for rid in flat_root_ids:
+            build_flat_paths(rid, "")
+
+        return id_to_name, id_to_path, name_to_path
+    def resolve_group_path(
+        self,
+        item: Dict[str, Any],
+        id_to_name: Dict[str, str],
+        id_to_path: Dict[str, str],
+        name_to_path: Dict[str, str],
+    ) -> Optional[str]:
+        """从 item 解析出语义化多级分组路径（如 '系统管理/用户管理/租户管理'）"""
+        raw_path = item.get("group_path") or item.get("group_name_path") or item.get("groupPath")
+        leaf_name = str(item.get("group_name") or item.get("groupName") or "").strip()
+
+        # 1. 如果 group_path 是类似 "1906207,1906234,1906268" 的 ID 路径或数组
+        if raw_path is not None:
+            if isinstance(raw_path, str):
+                segments = [s.strip() for s in raw_path.replace("\\", "/").split(",") if s.strip()]
+                # 如果不含逗号且包含斜杠，可能是已经命名的路径
+                if len(segments) == 1 and "/" in raw_path:
+                    segments = [s.strip() for s in raw_path.split("/") if s.strip()]
+            elif isinstance(raw_path, (list, tuple)):
+                segments = [str(s).strip() for s in raw_path if str(s).strip()]
+            else:
+                segments = [str(raw_path).strip()]
+
+            if segments:
+                # 判断 segments 是否主要是数字 ID
+                is_all_ids = all(s.isdigit() for s in segments)
+                if is_all_ids:
+                    resolved_names: List[str] = []
+                    for idx, gid in enumerate(segments):
+                        if gid in id_to_name:
+                            resolved_names.append(id_to_name[gid])
+                        elif idx == len(segments) - 1 and leaf_name:
+                            resolved_names.append(leaf_name)
+                        # 如果无法翻译该数字 ID，则跳过纯数字 ID 避免展示数字
+                    if resolved_names:
+                        return "/".join(resolved_names)
+                else:
+                    # 已经是名称数组
+                    return "/".join(segments)
+
+        # 2. 如果有 group_id，查 id_to_path
+        gid = item.get("group_id") if item.get("group_id") is not None else (
+            item.get("groupID") if item.get("groupID") is not None else item.get("api_group_id")
+        )
+        if gid is not None and str(gid) in id_to_path:
+            return id_to_path[str(gid)]
+
+        # 3. 如果有 group_name，查 name_to_path
+        if leaf_name:
+            if leaf_name in name_to_path:
+                return name_to_path[leaf_name]
+            return leaf_name
+
+        return None
 
     def list_apis(self, project_id: str, page: int = 1, size: int = 100) -> List[Dict[str, Any]]:
-        # 默认单页大容量（1000 条），并自动轮询后续页直至取完该项目全部接口
         fetch_size = max(size, 1000)
         curr_page = page
         all_raw_items: List[Dict[str, Any]] = []
+        id_to_name, id_to_path, name_to_path = self.get_group_maps(project_id)
 
         while True:
             query: Dict[str, Any] = {
                 "project_id": project_id,
+                "project_hash_key": project_id,
+                "projectHashKey": project_id,
                 "page": curr_page,
                 "size": fetch_size,
             }
@@ -533,6 +737,15 @@ class EolinkClient:
                 if isinstance(data, dict):
                     page_items = data.get("items") or data.get("list") or data.get("apiList") or []
                     paginator = data.get("paginator")
+                    # 如果响应内直接携带了 groupList，合并到映射
+                    sub_groups = data.get("groupList") or data.get("groups") or data.get("apiGroupList") or []
+                    if isinstance(sub_groups, list):
+                        for g in sub_groups:
+                            if isinstance(g, dict):
+                                gid = g.get("group_id") if g.get("group_id") is not None else g.get("groupID")
+                                gname = g.get("group_name") or g.get("groupName")
+                                if gid is not None and gname:
+                                    id_to_name[str(gid)] = str(gname).strip()
                 elif isinstance(data, list):
                     page_items = data
             elif isinstance(res, list):
@@ -543,16 +756,25 @@ class EolinkClient:
 
             all_raw_items.extend(page_items)
 
-            # 判断是否有下一页
             if paginator and isinstance(paginator, dict):
                 total = paginator.get("total") or 0
                 if len(all_raw_items) >= total:
                     break
                 curr_page += 1
-                if curr_page > 10:  # 安全上限：最多拉取 10,000 条
+                if curr_page > 10:
                     break
             else:
                 break
+
+        # 第一遍扫描：收集项目内所有接口声明的 group_id -> group_name 对应关系
+        for item in all_raw_items:
+            if isinstance(item, dict):
+                gid = item.get("group_id") if item.get("group_id") is not None else (
+                    item.get("groupID") if item.get("groupID") is not None else item.get("api_group_id")
+                )
+                gname = str(item.get("group_name") or item.get("groupName") or "").strip()
+                if gid is not None and gname:
+                    id_to_name[str(gid)] = gname
 
         items = all_raw_items
         result = []
@@ -565,9 +787,11 @@ class EolinkClient:
 
             protocol = "http" if method else "other"
             extra = []
-            group = item.get("group_name") or item.get("groupName")
-            if group:
-                extra.append({"label": "分组", "value": str(group)})
+
+            resolved_group = self.resolve_group_path(item, id_to_name, id_to_path, name_to_path)
+            if resolved_group:
+                extra.append({"label": "分组", "value": str(resolved_group)})
+
             status = item.get("api_status") if item.get("api_status") is not None else item.get("status")
             if status is not None:
                 status_desc = API_STATUS_MAP.get(status, str(status)) if isinstance(status, int) else str(status)
@@ -611,9 +835,10 @@ class EolinkClient:
         path = norm_raw.get("api_uri") or norm_raw.get("path") or norm_raw.get("uri") or norm_raw.get("apiURI")
 
         extra = []
-        group = norm_raw.get("group_name") or norm_raw.get("groupName")
-        if group:
-            extra.append({"label": "分组", "value": str(group)})
+        id_to_name, id_to_path, name_to_path = self.get_group_maps(pid) if pid else ({}, {}, {})
+        resolved_group = self.resolve_group_path(norm_raw, id_to_name, id_to_path, name_to_path)
+        if resolved_group:
+            extra.append({"label": "分组", "value": str(resolved_group)})
         status = norm_raw.get("api_status") if norm_raw.get("api_status") is not None else norm_raw.get("apiStatus")
         if status is not None:
             status_desc = API_STATUS_MAP.get(status, str(status)) if isinstance(status, int) else str(status)
@@ -843,7 +1068,28 @@ def run_self_test() -> int:
     # 3. Test mock data mapping for Apikit v3
     class MockClient(EolinkClient):
         def _request(self, path: str, query: Optional[Dict[str, Any]] = None) -> Any:
-            if path == "/v3/api-management/projects":
+            if path in ("/v3/api-management/api-groups", "/v3/api-management/groups"):
+                return {
+                    "statusCode": "000000",
+                    "data": [
+                        {
+                            "group_id": 1906207,
+                            "group_name": "系统管理",
+                            "parent_group_id": 0,
+                        },
+                        {
+                            "group_id": 1906234,
+                            "group_name": "用户管理",
+                            "parent_group_id": 1906207,
+                        },
+                        {
+                            "group_id": 1906268,
+                            "group_name": "租户管理（系统管理员）",
+                            "parent_group_id": 1906234,
+                        },
+                    ],
+                }
+            elif path == "/v3/api-management/projects":
                 return {
                     "type": "array",
                     "data": [
@@ -858,16 +1104,27 @@ def run_self_test() -> int:
                 return {
                     "statusCode": "000000",
                     "data": {
-                        "paginator": {"page": 1, "size": 20, "total": 1},
+                        "paginator": {"page": 1, "size": 20, "total": 2},
                         "items": [
                             {
                                 "api_id": 237665,
-                                "api_name": "获取用户信息",
+                                "api_name": "获取租户列表",
                                 "api_request_type": 1,  # 1 = GET
-                                "api_uri": "http://172.18.65.54:8099/users/1",
-                                "group_name": "用户模块",
+                                "api_uri": "http://172.18.65.54:8099/tenants",
+                                "group_id": 1906268,
+                                "group_name": "租户管理（系统管理员）",
+                                "group_path": "1906207,1906234,1906268",
                                 "api_status": 3,
-                            }
+                            },
+                            {
+                                "api_id": 237666,
+                                "api_name": "获取用户信息",
+                                "api_request_type": 1,
+                                "api_uri": "http://172.18.65.54:8099/users/1",
+                                "group_id": 1906234,
+                                "group_name": "用户管理",
+                                "api_status": 0,
+                            },
                         ],
                     },
                 }
@@ -919,22 +1176,29 @@ def run_self_test() -> int:
         print(f"  [FAIL] browse(project) Apikit v3 test failed: {e}")
         passed = False
 
-    # Test browse apis with api_request_type
+    # Test browse apis with multi-level ID path resolution
     try:
         mock_client = MockClient({"api_key": "mock_key", "project_id": "proj_1001"})
         apis = mock_client.list_apis("proj_1001")
-        assert len(apis) == 1
+        assert len(apis) == 2
         assert apis[0]["id"] == "proj_1001:237665"
-        assert apis[0]["name"] == "获取用户信息"
+        assert apis[0]["name"] == "获取租户列表"
         assert apis[0]["protocol"] == "http"
         assert apis[0]["method"] == "GET"
-        assert apis[0]["path"] == "http://172.18.65.54:8099/users/1"
+        assert any(
+            e["label"] == "分组" and e["value"] == "系统管理/用户管理/租户管理（系统管理员）"
+            for e in apis[0]["extra"]
+        ), f"Expected full group path, got {apis[0]['extra']}"
+        assert any(
+            e["label"] == "分组" and e["value"] == "系统管理/用户管理"
+            for e in apis[1]["extra"]
+        ), f"Expected 2-level group path, got {apis[1]['extra']}"
         print("  [PASS] browse(api) Apikit v3 test passed")
     except Exception as e:
         print(f"  [FAIL] browse(api) Apikit v3 test failed: {e}")
         passed = False
 
-    # Test get_item
+    # Test get_item with multi-level group resolution
     try:
         detail = mock_client.get_api_detail("proj_1001:237665")
         assert detail["name"] == "获取用户信息"
