@@ -64,6 +64,8 @@ API_PROTOCOL_MAP = {
     3: "WSS",
     4: "TCP",
     5: "UDP",
+    6: "RPC/gRPC",
+    7: "FS2.0",
 }
 
 # 请求参数类型映射
@@ -141,6 +143,131 @@ def parse_http_method(raw: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def detect_api_protocol_kind(raw: Dict[str, Any]) -> str:
+    """识别 Eolink 接口的真实协议类型
+
+    返回值:
+      'http' | 'https' | 'ws' | 'wss' | 'tcp' | 'udp' | 'grpc' |
+      'sse' | 'graphql' | 'mqtt' | 'kafka' |
+      'dubbo' | 'bolt' | 'hsf' | 'tars' | 'ufx' | 'fs20' | 'zhongzhuo' | 'other'
+    """
+    path = str(
+        raw.get("api_uri")
+        or raw.get("path")
+        or raw.get("uri")
+        or raw.get("apiURI")
+        or ""
+    ).strip()
+    path_lower = path.lower()
+
+    if path_lower.startswith("wss://"):
+        return "wss"
+    if path_lower.startswith("ws://"):
+        return "ws"
+    if path_lower.startswith("tcp://"):
+        return "tcp"
+    if path_lower.startswith("udp://"):
+        return "udp"
+    if path_lower.startswith("grpc://") or path_lower.startswith("grpcs://"):
+        return "grpc"
+
+    api_type = str(raw.get("api_type") or raw.get("apiType") or "").strip().lower()
+    proto_raw = raw.get("api_protocol")
+    if proto_raw is None:
+        proto_raw = raw.get("apiProtocol")
+    proto_str = str(proto_raw).strip().lower() if proto_raw is not None else ""
+
+    # 1. 优先识别显式非 HTTP 的 api_type
+    if api_type == "wss":
+        return "wss"
+    if api_type in ("websocket", "ws"):
+        return "wss" if proto_str == "3" or proto_str == "wss" else "ws"
+    if api_type == "tcp":
+        return "tcp"
+    if api_type == "udp":
+        return "udp"
+    if api_type == "socket":
+        if proto_str in ("5", "udp"):
+            return "udp"
+        return "tcp"
+    if api_type == "grpc":
+        return "grpc"
+    if api_type in ("sse", "graphql", "mqtt", "kafka", "dubbo", "bolt", "hsf", "tars", "ufx", "fs20", "zhongzhuo"):
+        return api_type
+
+    # 2. 按 api_protocol 整数/字符串枚举识别（详情接口通常不含 api_type，仅含 api_protocol）
+    if proto_str in ("2", "ws", "websocket"):
+        return "ws"
+    if proto_str in ("3", "wss"):
+        return "wss"
+    if proto_str in ("4", "tcp"):
+        return "tcp"
+    if proto_str in ("5", "udp"):
+        return "udp"
+    if proto_str in ("6", "grpc", "rpc"):
+        custom_info = raw.get("custom_info")
+        if isinstance(custom_info, dict) and "app_name" in custom_info and "group" in custom_info:
+            return "dubbo"
+        return "grpc"
+    if proto_str in ("7", "fs20"):
+        return "fs20"
+    if proto_str in ("1", "https"):
+        return "https"
+    if proto_str in ("0", "http") or api_type in ("http", "soap"):
+        return "https" if path_lower.startswith("https://") else "http"
+
+    if parse_http_method(raw):
+        return "https" if path_lower.startswith("https://") else "http"
+    return "other"
+
+
+def resolve_data_item_protocol_and_method(raw: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """映射为宿主 DataItem 契约的 (protocol, method)
+
+    DataItemProtocol 合法枚举值:
+      'http' | 'websocket' | 'sse' | 'tcp' | 'graphql' | 'mqtt' | 'kafka' | 'other'
+    """
+    kind = detect_api_protocol_kind(raw)
+    if kind in ("http", "https"):
+        return "http", parse_http_method(raw) or "GET"
+    if kind == "ws":
+        return "websocket", "WS"
+    if kind == "wss":
+        return "websocket", "WSS"
+    if kind == "tcp":
+        return "tcp", "TCP"
+    if kind == "udp":
+        return "other", "UDP"
+    if kind == "grpc":
+        return "other", "gRPC"
+    if kind == "sse":
+        return "sse", "SSE"
+    if kind == "graphql":
+        return "graphql", "GQL"
+    if kind == "mqtt":
+        return "mqtt", "MQTT"
+    if kind == "kafka":
+        return "kafka", "KAFKA"
+    if kind != "other":
+        return "other", kind.upper()
+    return "other", None
+
+
+def parse_host_port(addr: str, default_port: int = 0) -> Tuple[str, int]:
+    """从形如 '42.194.220.130:5002' 或 'tcp://127.0.0.1:9000/path' 提取 (host, port)"""
+    cleaned = str(addr or "").strip()
+    if "://" in cleaned:
+        cleaned = cleaned.split("://", 1)[1]
+    cleaned = cleaned.split("/", 1)[0].strip()
+    if ":" in cleaned:
+        host_part, port_part = cleaned.rsplit(":", 1)
+        try:
+            return host_part.strip(), int(port_part.strip())
+        except Exception:
+            return cleaned, default_port
+    return cleaned, default_port
+
+
 def normalize_api_raw(raw: Any, fallback_aid: str = "") -> Dict[str, Any]:
     """标准化 API 原始对象，展开 baseInfo/api_info 等嵌套字段"""
     if not isinstance(raw, dict):
@@ -156,11 +283,73 @@ def normalize_api_raw(raw: Any, fallback_aid: str = "") -> Dict[str, Any]:
     return merged
 
 
-def build_sample_value(param: Dict[str, Any]) -> Any:
+def extract_structure_map(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    """从详情对象提取 data_structure_list 映射: structure_id -> structure_data 参数列表"""
+    ds_raw = raw.get("data_structure_list") or raw.get("dataStructureList")
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    if isinstance(ds_raw, dict):
+        for k, v in ds_raw.items():
+            if isinstance(v, dict):
+                sdata = v.get("structure_data") or v.get("structureData")
+                if isinstance(sdata, list):
+                    result[str(k)] = sdata
+                    sid = v.get("structure_id") or v.get("structureID")
+                    if sid is not None:
+                        result[str(sid)] = sdata
+    elif isinstance(ds_raw, list):
+        for v in ds_raw:
+            if isinstance(v, dict):
+                sid = v.get("structure_id") or v.get("structureID")
+                sdata = v.get("structure_data") or v.get("structureData")
+                if sid is not None and isinstance(sdata, list):
+                    result[str(sid)] = sdata
+    return result
+
+
+def expand_param_list(
+    params: List[Dict[str, Any]],
+    structures: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    visited: Optional[set] = None,
+) -> List[Dict[str, Any]]:
+    """展开列表中包含 structure_id 引用的条目"""
+    if not params:
+        return []
+    if not structures:
+        return params
+    visited_set = set(visited) if visited else set()
+    expanded: List[Dict[str, Any]] = []
+    for p in params:
+        if not isinstance(p, dict):
+            continue
+        key = p.get("paramKey") or p.get("param_key")
+        sid = p.get("structure_id") or p.get("structureID")
+        if not key and sid is not None and str(sid) in structures and str(sid) not in visited_set:
+            next_visited = set(visited_set)
+            next_visited.add(str(sid))
+            expanded.extend(expand_param_list(structures[str(sid)], structures, next_visited))
+        else:
+            expanded.append(p)
+    return expanded
+
+
+def build_sample_value(
+    param: Dict[str, Any],
+    structures: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    visited: Optional[set] = None,
+) -> Any:
     """根据 Eolink/Apikit 参数定义递归构建示例值"""
     p_type = str(param.get("paramType") if param.get("paramType") is not None else (param.get("param_type") or "0"))
     p_value = param.get("paramValue") if param.get("paramValue") is not None else param.get("param_value")
-    children = param.get("childList") or param.get("child_list") or []
+    raw_children = param.get("childList") or param.get("child_list") or []
+    visited_set = set(visited) if visited else set()
+
+    # 如果 param_type 本身指向某个 data_structure_list ID
+    if not raw_children and structures and p_type in structures and p_type not in visited_set:
+        visited_set = set(visited_set)
+        visited_set.add(p_type)
+        raw_children = structures[p_type]
+
+    children = expand_param_list(raw_children, structures, visited_set)
 
     # 若已包含有效 JSON 字符串，优先解析
     if isinstance(p_value, str) and (p_value.strip().startswith("{") or p_value.strip().startswith("[")):
@@ -172,23 +361,32 @@ def build_sample_value(param: Dict[str, Any]) -> Any:
     # Array: 12 or 'array'
     if p_type in ("12", "array"):
         if children:
-            return [build_sample_value(c) for c in children]
+            if len(children) == 1 and str(children[0].get("paramKey") or children[0].get("param_key") or "").startswith("item["):
+                return [build_sample_value(children[0], structures, visited_set)]
+            return [build_sample_value(c, structures, visited_set) for c in children]
         return []
 
-    # Object: 13 or 'object' 或包含子字段
-    if p_type in ("13", "object") or children:
+    # Object / Message: 13 or 'object' or 'message' 或包含子字段
+    if p_type in ("13", "object", "message") or children:
         obj = {}
         for c in children:
             key = c.get("paramKey") or c.get("param_key") or ""
             if key and not key.startswith("item["):
-                obj[key] = build_sample_value(c)
+                obj[key] = build_sample_value(c, structures, visited_set)
             elif len(children) == 1 and key.startswith("item["):
-                return build_sample_value(c)
+                return build_sample_value(c, structures, visited_set)
         if obj:
             return obj
+        if p_type in ("13", "object", "message"):
+            return {}
 
-    # Number / Int / Long: 3, 4, 5, 10, 11, 14
-    if p_type in ("3", "4", "5", "10", "11", "14", "int", "float", "double", "number", "long"):
+    # Number / Int / Long / Protobuf numeric types: 3, 4, 5, 10, 11, 14
+    if p_type in (
+        "3", "4", "5", "10", "11", "14",
+        "int", "int32", "int64", "uint32", "uint64", "sint32", "sint64",
+        "fixed32", "fixed64", "sfixed32", "sfixed64",
+        "float", "double", "number", "long", "short", "byte",
+    ):
         if p_value is not None and p_value != "":
             try:
                 if "." in str(p_value):
@@ -215,35 +413,49 @@ def build_sample_value(param: Dict[str, Any]) -> Any:
     return name
 
 
-def build_json_body_from_request_info(request_info: List[Dict[str, Any]]) -> str:
+def build_json_body_from_request_info(
+    request_info: List[Dict[str, Any]],
+    structures: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    unwrap_single_message: bool = False,
+) -> str:
     """从 request_info 递归构建格式化的 JSON 请求体"""
     if not request_info:
         return ""
+    expanded = expand_param_list(request_info, structures)
+    if (
+        unwrap_single_message
+        and len(expanded) == 1
+        and str(expanded[0].get("param_type") or expanded[0].get("paramType") or "") == "message"
+    ):
+        val = build_sample_value(expanded[0], structures)
+        if isinstance(val, dict):
+            return json.dumps(val, ensure_ascii=False, indent=2)
     root = {}
-    for p in request_info:
+    for p in expanded:
         key = p.get("paramKey") or p.get("param_key")
         if key:
-            root[key] = build_sample_value(p)
+            root[key] = build_sample_value(p, structures)
     return json.dumps(root, ensure_ascii=False, indent=2) if root else ""
 
 
 def convert_api_to_template(item_id: str, raw: Dict[str, Any], base_url_config: str = "") -> Dict[str, Any]:
     """将 Eolink API 详情数据转换为标准 NodeTemplate"""
     norm_raw = normalize_api_raw(raw, item_id.split(":")[-1])
+    structures = extract_structure_map(norm_raw)
 
     name = norm_raw.get("api_name") or norm_raw.get("name") or norm_raw.get("apiName") or "HTTP Request"
     method_upper = parse_http_method(norm_raw) or "GET"
     method_lower = method_upper.lower()
 
-    path = norm_raw.get("api_uri") or norm_raw.get("path") or norm_raw.get("uri") or norm_raw.get("apiURI") or ""
+    path = str(
+        norm_raw.get("api_uri")
+        or norm_raw.get("path")
+        or norm_raw.get("uri")
+        or norm_raw.get("apiURI")
+        or ""
+    ).strip()
 
-    # Protocol
-    proto_raw = norm_raw.get("api_protocol")
-    if proto_raw is None:
-        proto_raw = norm_raw.get("apiProtocol")
-    type_id = "http"
-    if proto_raw in (2, 3) or str(proto_raw) in ("2", "3") or path.startswith("ws://") or path.startswith("wss://"):
-        type_id = "ws_connect"
+    proto_kind = detect_api_protocol_kind(norm_raw)
 
     # Query Params (url_param / urlParam)
     url_params = norm_raw.get("url_param") or norm_raw.get("urlParam") or []
@@ -262,7 +474,10 @@ def convert_api_to_template(item_id: str, raw: Dict[str, Any], base_url_config: 
         sep = "&" if "?" in full_url else "?"
         full_url += sep + "&".join(query_parts)
 
-    if not full_url.startswith("http://") and not full_url.startswith("https://") and not full_url.startswith("ws://") and not full_url.startswith("wss://"):
+    if (
+        proto_kind in ("http", "https", "ws", "wss", "sse")
+        and not full_url.startswith(("http://", "https://", "ws://", "wss://"))
+    ):
         base = norm_raw.get("base_url") or norm_raw.get("baseUrl") or norm_raw.get("host")
         if base:
             full_url = f"{str(base).rstrip('/')}/{full_url.lstrip('/')}"
@@ -274,7 +489,15 @@ def convert_api_to_template(item_id: str, raw: Dict[str, Any], base_url_config: 
     header_list = norm_raw.get("header_info") or norm_raw.get("headerInfo") or []
     for h in header_list:
         hk = h.get("header_name") or h.get("headerName") or h.get("param_key") or h.get("paramKey") or h.get("name")
-        hv = h.get("header_value") if h.get("header_value") is not None else (h.get("headerValue") if h.get("headerValue") is not None else (h.get("param_value") if h.get("param_value") is not None else h.get("paramValue")))
+        hv = (
+            h.get("header_value")
+            if h.get("header_value") is not None
+            else (
+                h.get("headerValue")
+                if h.get("headerValue") is not None
+                else (h.get("param_value") if h.get("param_value") is not None else h.get("paramValue"))
+            )
+        )
         if hk:
             headers[hk] = str(hv) if (hv is not None and hv != "") else f"{{{{{hk}}}}}"
 
@@ -298,48 +521,62 @@ def convert_api_to_template(item_id: str, raw: Dict[str, Any], base_url_config: 
     raw_body_text = norm_raw.get("api_request_raw") or norm_raw.get("apiRequestRaw") or ""
 
     if req_param_type == 0:  # Form-data
-        body_type = "form-data"
-        content_type = "text"
-        form_fields = []
-        for p in req_info:
+        built_fields = []
+        for p in expand_param_list(req_info, structures):
             k = p.get("param_key") or p.get("paramKey") or ""
             v = p.get("param_value") if p.get("param_value") is not None else p.get("paramValue")
             pt = str(p.get("param_type") if p.get("param_type") is not None else (p.get("paramType") or "0"))
             ft = "file" if pt in ("2", "file") else "text"
             if k:
-                form_fields.append({"key": k, "value": str(v or ""), "field_type": ft})
+                built_fields.append({"key": k, "value": str(v or ""), "field_type": ft})
+        if built_fields:
+            body_type = "form-data"
+            content_type = "text"
+            form_fields = built_fields
     elif req_param_type == 1:  # RAW
-        body_type = "body"
-        content_type = "text"
-        body = raw_body_text
+        if raw_body_text:
+            body_type = "body"
+            content_type = "text"
+            body = raw_body_text
     elif req_param_type == 2:  # JSON
-        body_type = "body"
-        content_type = "json"
         if raw_body_text and (raw_body_text.strip().startswith("{") or raw_body_text.strip().startswith("[")):
             body = raw_body_text
         elif req_info:
-            body = build_json_body_from_request_info(req_info)
+            body = build_json_body_from_request_info(
+                req_info,
+                structures,
+                unwrap_single_message=(proto_kind in ("grpc", "dubbo", "bolt", "hsf")),
+            )
+        if body or method_lower in ("post", "put", "patch"):
+            body_type = "body"
+            content_type = "json"
     elif req_param_type == 3:  # XML
-        body_type = "body"
-        content_type = "xml"
-        body = raw_body_text
+        xml_body = raw_body_text or build_json_body_from_request_info(req_info, structures)
+        if xml_body or method_lower in ("post", "put", "patch"):
+            body_type = "body"
+            content_type = "xml"
+            body = xml_body
     elif req_param_type == 4:  # Binary
-        body_type = "binary"
-        file_path = norm_raw.get("api_request_binary") or norm_raw.get("apiRequestBinary") or ""
+        bin_path = norm_raw.get("api_request_binary") or norm_raw.get("apiRequestBinary") or ""
+        if bin_path or method_lower in ("post", "put", "patch"):
+            body_type = "binary"
+            file_path = bin_path
     elif req_param_type == 5:  # x-www-form-urlencoded
-        body_type = "x-www-form-urlencoded"
-        content_type = "text"
-        form_fields = []
-        for p in req_info:
+        built_fields = []
+        for p in expand_param_list(req_info, structures):
             k = p.get("param_key") or p.get("paramKey") or ""
             v = p.get("param_value") if p.get("param_value") is not None else p.get("paramValue")
             if k:
-                form_fields.append({"key": k, "value": str(v or ""), "field_type": "text"})
+                built_fields.append({"key": k, "value": str(v or ""), "field_type": "text"})
+        if built_fields:
+            body_type = "x-www-form-urlencoded"
+            content_type = "text"
+            form_fields = built_fields
     else:
         if req_info and method_lower in ("post", "put", "patch"):
             body_type = "body"
             content_type = "json"
-            body = build_json_body_from_request_info(req_info)
+            body = build_json_body_from_request_info(req_info, structures)
         elif raw_body_text:
             body_type = "body"
             content_type = "json" if (raw_body_text.strip().startswith("{") or raw_body_text.strip().startswith("[")) else "text"
@@ -363,14 +600,91 @@ def convert_api_to_template(item_id: str, raw: Dict[str, Any], base_url_config: 
                 "token": jwt.get("payload", ""),
             }
 
-    if type_id == "ws_connect":
+    if proto_kind in ("ws", "wss"):
+        type_id = "ws:connect"
+        ws_url = full_url
+        scheme = "wss://" if proto_kind == "wss" else "ws://"
+        if ws_url.startswith("http://"):
+            ws_url = scheme + ws_url[len("http://"):]
+        elif ws_url.startswith("https://"):
+            ws_url = "wss://" + ws_url[len("https://"):]
+        elif ws_url and not ws_url.startswith(("ws://", "wss://", "/", "{{")):
+            ws_url = scheme + ws_url
+        ws_headers = [{"key": k, "value": v, "field_type": "text"} for k, v in headers.items()] if headers else None
+        node_data: Dict[str, Any] = {
+            "type": "ws:connect",
+            "url": ws_url,
+            "headers": ws_headers,
+            "use_tls": True if (proto_kind == "wss" or ws_url.startswith("wss://")) else None,
+        }
+    elif proto_kind == "tcp":
+        type_id = "tcp:connect"
+        host, port = parse_host_port(path, 0)
         node_data = {
-            "type": "ws_connect",
+            "type": "tcp:connect",
+            "host": host,
+            "port": port,
+        }
+    elif proto_kind == "udp":
+        type_id = "udp:send_to"
+        target_addr, target_port = parse_host_port(path, 0)
+        udp_payload = body or raw_body_text or build_json_body_from_request_info(req_info, structures)
+        node_data = {
+            "type": "udp:send_to",
+            "connection_id": "",
+            "target_addr": target_addr,
+            "target_port": target_port,
+            "data": udp_payload,
+            "data_encoding": "text",
+        }
+    elif proto_kind in ("grpc", "dubbo", "bolt", "hsf"):
+        type_id = "grpc:call"
+        custom_info = norm_raw.get("custom_info") if isinstance(norm_raw.get("custom_info"), dict) else {}
+        service_name = str(custom_info.get("interface_name") or norm_raw.get("interface_name") or "").strip()
+        method_name = str(custom_info.get("method_name") or norm_raw.get("method_name") or "").strip()
+        if not service_name or not method_name:
+            cleaned_uri = path.strip("/")
+            if "/" in cleaned_uri:
+                s_part, m_part = cleaned_uri.rsplit("/", 1)
+                service_name = service_name or s_part
+                method_name = method_name or m_part
+            elif "." in cleaned_uri:
+                s_part, m_part = cleaned_uri.rsplit(".", 1)
+                service_name = service_name or s_part
+                method_name = method_name or m_part
+            else:
+                method_name = method_name or cleaned_uri or name
+        grpc_payload = body or raw_body_text or build_json_body_from_request_info(
+            req_info, structures, unwrap_single_message=True
+        )
+        grpc_meta = [{"key": k, "value": v} for k, v in headers.items()] if headers else None
+        node_data = {
+            "type": "grpc:call",
+            "connection_id": "",
+            "service_name": service_name,
+            "method_name": method_name,
+            "request_json": grpc_payload or "{}",
+            "timeout_ms": 30000,
+            "metadata": grpc_meta,
+        }
+    elif proto_kind == "sse":
+        type_id = "sse:connect"
+        node_data = {
+            "type": "sse:connect",
             "url": full_url,
+            "headers": headers if headers else None,
+        }
+    elif proto_kind == "graphql":
+        type_id = "graphql:query"
+        node_data = {
+            "type": "graphql:query",
+            "connection_id": "",
+            "query": body or raw_body_text or "",
         }
     else:
+        type_id = "http:request"
         node_data = {
-            "type": "http",
+            "type": "http:request",
             "url": full_url,
             "method": method_lower,
             "headers": headers if headers else None,
@@ -559,11 +873,11 @@ class EolinkClient:
         all_group_roots: List[Dict[str, Any]] = []
 
         for endpoint in (
+            "/v3/api-management/api/groups",
             "/v3/api-management/api-groups",
             "/v3/api-management/api-group/list",
             "/v3/api-management/groups",
             "/v3/api-management/group/list",
-            "/v3/api-management/api/groups",
             "/v3/api-management/api/group/list",
             "/v3/api-management/group/get-group-list",
             "/api-management/api-group/get-group-list",
@@ -782,10 +1096,8 @@ class EolinkClient:
             raw_id = str(item.get("api_id") or item.get("id") or item.get("apiID") or "")
             item_id = f"{project_id}:{raw_id}" if raw_id else f"{project_id}:unknown"
             name = item.get("api_name") or item.get("name") or item.get("apiName") or "未命名接口"
-            method = parse_http_method(item)
+            protocol, method = resolve_data_item_protocol_and_method(item)
             path = item.get("api_uri") or item.get("path") or item.get("uri") or item.get("apiURI")
-
-            protocol = "http" if method else "other"
             extra = []
 
             resolved_group = self.resolve_group_path(item, id_to_name, id_to_path, name_to_path)
@@ -809,7 +1121,7 @@ class EolinkClient:
             })
         return result
 
-    def get_api_detail(self, item_id: str) -> Dict[str, Any]:
+    def fetch_api_raw(self, item_id: str) -> Tuple[str, str, Dict[str, Any]]:
         parts = item_id.split(":", 1)
         if len(parts) == 2:
             pid, aid = parts[0], parts[1]
@@ -829,9 +1141,13 @@ class EolinkClient:
 
         raw = res.get("data") if isinstance(res, dict) and "data" in res else res
         norm_raw = normalize_api_raw(raw, aid)
+        return pid, aid, norm_raw
+
+    def get_api_detail(self, item_id: str) -> Dict[str, Any]:
+        pid, _aid, norm_raw = self.fetch_api_raw(item_id)
 
         name = norm_raw.get("api_name") or norm_raw.get("name") or norm_raw.get("apiName") or "未命名接口"
-        method = parse_http_method(norm_raw)
+        protocol, method = resolve_data_item_protocol_and_method(norm_raw)
         path = norm_raw.get("api_uri") or norm_raw.get("path") or norm_raw.get("uri") or norm_raw.get("apiURI")
 
         extra = []
@@ -843,9 +1159,9 @@ class EolinkClient:
         if status is not None:
             status_desc = API_STATUS_MAP.get(status, str(status)) if isinstance(status, int) else str(status)
             extra.append({"label": "状态", "value": status_desc})
-        protocol = norm_raw.get("api_protocol") if norm_raw.get("api_protocol") is not None else norm_raw.get("apiProtocol")
-        if protocol is not None:
-            proto_desc = API_PROTOCOL_MAP.get(protocol, str(protocol)) if isinstance(protocol, int) else str(protocol)
+        raw_proto = norm_raw.get("api_protocol") if norm_raw.get("api_protocol") is not None else norm_raw.get("apiProtocol")
+        if raw_proto is not None:
+            proto_desc = API_PROTOCOL_MAP.get(raw_proto, str(raw_proto)) if isinstance(raw_proto, int) else str(raw_proto)
             extra.append({"label": "协议", "value": proto_desc})
         update_time = norm_raw.get("api_update_time") or norm_raw.get("apiUpdateTime")
         if update_time:
@@ -854,7 +1170,7 @@ class EolinkClient:
         return {
             "id": item_id,
             "name": name,
-            "protocol": "http" if method else "other",
+            "protocol": protocol,
             "method": method,
             "path": str(path) if path else None,
             "summary": norm_raw.get("summary") or norm_raw.get("description") or norm_raw.get("api_note_raw") or norm_raw.get("apiNoteRaw") or norm_raw.get("api_note"),
@@ -900,8 +1216,7 @@ def handle_get_templates(config: Dict[str, Any], item_ids: List[str]) -> List[Di
     templates = []
     for item_id in item_ids:
         try:
-            detail = client.get_api_detail(item_id)
-            raw = detail.get("raw", {})
+            _pid, _aid, raw = client.fetch_api_raw(item_id)
             template = convert_api_to_template(item_id, raw, base_url_config=client.base_url)
             templates.append(template)
         except Exception as e:
@@ -950,7 +1265,7 @@ def describe_result() -> Dict[str, Any]:
     return {
         "plugin": {
             "name": "eolink",
-            "version": "0.1.0",
+            "version": "0.1.5",
             "kind": "datasource",
             "description": "Eolink 数据源（只读浏览 + 拖拽导入）",
             "entry": get_plugin_entry(),
@@ -1213,7 +1528,7 @@ def run_self_test() -> int:
     try:
         raw = mock_client.get_api_detail("proj_1001:237665")["raw"]
         tpl = convert_api_to_template("proj_1001:237665", raw, "http://api.example.com")
-        assert tpl["type_id"] == "http"
+        assert tpl["type_id"] == "http:request"
         assert tpl["name"] == "获取用户信息"
         data = tpl["data"]
         assert data["method"] == "post"
@@ -1243,6 +1558,106 @@ def run_self_test() -> int:
         assert form_tpl["data"]["form_fields"][0]["field_type"] == "text"
         assert form_tpl["data"]["form_fields"][1]["field_type"] == "file"
 
+
+        # Test GET with default param_type=0 and empty request_info keeps body_type='none'
+        get_empty_raw = {
+            "api_name": "获取候选列表",
+            "api_uri": "/api/v1/candidates",
+            "api_protocol": 0,
+            "api_request_type": 1,  # GET
+            "api_request_param_type": 0,  # Eolink default Form-data
+            "request_info": [],
+        }
+        get_tpl = convert_api_to_template("proj_1001:237667", get_empty_raw)
+        assert get_tpl["type_id"] == "http:request"
+        assert get_tpl["data"]["method"] == "get"
+        assert get_tpl["data"]["body_type"] == "none"
+
+        # Test WebSocket (api_protocol=2/3)
+        ws_raw = {
+            "api_name": "实时日志流",
+            "api_uri": "116.62.184.125:2000/ws/logs",
+            "api_protocol": 2,
+            "api_request_type": 0,
+        }
+        ws_proto, ws_method = resolve_data_item_protocol_and_method(ws_raw)
+        assert ws_proto == "websocket" and ws_method == "WS"
+        ws_tpl = convert_api_to_template("proj_1001:237668", ws_raw)
+        assert ws_tpl["type_id"] == "ws:connect"
+        assert ws_tpl["data"]["type"] == "ws:connect"
+        assert ws_tpl["data"]["url"] == "ws://116.62.184.125:2000/ws/logs"
+
+        # Test TCP (api_protocol=4)
+        tcp_raw = {
+            "api_name": "TCP 报文服务",
+            "api_uri": "42.194.220.130:5002",
+            "api_protocol": 4,
+            "api_request_type": 0,
+        }
+        tcp_proto, tcp_method = resolve_data_item_protocol_and_method(tcp_raw)
+        assert tcp_proto == "tcp" and tcp_method == "TCP"
+        tcp_tpl = convert_api_to_template("proj_1001:237669", tcp_raw)
+        assert tcp_tpl["type_id"] == "tcp:connect"
+        assert tcp_tpl["data"]["type"] == "tcp:connect"
+        assert tcp_tpl["data"]["host"] == "42.194.220.130"
+        assert tcp_tpl["data"]["port"] == 5002
+
+        # Test UDP (api_protocol=5)
+        udp_raw = {
+            "api_name": "UDP 广播",
+            "api_uri": "42.194.220.130:5003",
+            "api_protocol": 5,
+            "api_request_type": 0,
+            "request_info": [{"param_key": "msg", "param_value": "hello", "param_type": "0"}],
+        }
+        udp_proto, udp_method = resolve_data_item_protocol_and_method(udp_raw)
+        assert udp_proto == "other" and udp_method == "UDP"
+        udp_tpl = convert_api_to_template("proj_1001:237670", udp_raw)
+        assert udp_tpl["type_id"] == "udp:send_to"
+        assert udp_tpl["data"]["type"] == "udp:send_to"
+        assert udp_tpl["data"]["target_addr"] == "42.194.220.130"
+        assert udp_tpl["data"]["target_port"] == 5003
+        assert json.loads(udp_tpl["data"]["data"]) == {"msg": "hello"}
+
+        # Test gRPC (api_protocol=6 + data_structure_list expansion)
+        grpc_raw = {
+            "api_name": "GetFeature",
+            "api_uri": "routeguide.RouteGuide.GetFeature",
+            "api_protocol": 6,
+            "api_request_type": 0,
+            "api_request_param_type": 2,
+            "custom_info": {
+                "interface_name": "routeguide.RouteGuide",
+                "method_name": "GetFeature",
+            },
+            "request_info": [
+                {
+                    "param_key": "Point",
+                    "param_type": "message",
+                    "child_list": [{"structure_id": "1061413"}],
+                }
+            ],
+            "data_structure_list": {
+                "1061413": {
+                    "structure_id": 1061413,
+                    "structure_data": [
+                        {"param_key": "latitude", "param_type": "int32", "param_value": "409146138"},
+                        {"param_key": "longitude", "param_type": "int32", "param_value": "-746188906"},
+                    ],
+                }
+            },
+        }
+        grpc_proto, grpc_method = resolve_data_item_protocol_and_method(grpc_raw)
+        assert grpc_proto == "other" and grpc_method == "gRPC"
+        grpc_tpl = convert_api_to_template("proj_1001:237671", grpc_raw)
+        assert grpc_tpl["type_id"] == "grpc:call"
+        assert grpc_tpl["data"]["type"] == "grpc:call"
+        assert grpc_tpl["data"]["service_name"] == "routeguide.RouteGuide"
+        assert grpc_tpl["data"]["method_name"] == "GetFeature"
+        assert json.loads(grpc_tpl["data"]["request_json"]) == {
+            "latitude": 409146138,
+            "longitude": -746188906,
+        }
         print("  [PASS] get_templates (convert_api_to_template) Apikit v3 test passed")
     except Exception as e:
         print(f"  [FAIL] get_templates test failed: {e}")
