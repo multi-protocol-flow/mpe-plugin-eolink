@@ -68,7 +68,7 @@ This plugin interacts with Apikit / Eolink OpenAPI v3 endpoints:
 - **API Details**: `GET /v3/api-management/api?project_id={project_id}&space_id={space_id}&api_id={api_id}`
 
 ### Key Features
-1. **Automatic Route Normalization**: Seamlessly handles `http://uat.apikit.com/index.php` or custom routing prefixes.
+1. **Automatic Route Normalization**: Handles the standard Apikit `/index.php` prefix as well as any custom service address.
 2. **Method Enum Mapping**: Maps `api_request_type` integer enums (0:POST, 1:GET, 2:PUT, 3:DELETE, 4:HEAD, 5:OPTIONS, 6:PATCH).
 3. **Recursive Body & Param Extraction**: Recursively converts nested JSON / Form parameter structures into formatted JSON sample request bodies and structured query/header parameter lists.
 
@@ -80,10 +80,9 @@ The following parameters can be configured in the MPE datasource settings:
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `base_url` | string | Yes | `http://uat.apikit.com/index.php` | Eolink / Apikit OpenAPI base address |
-| `token` / `api_key` | string | Yes | - | Apikit OpenAPI authentication token |
-| `space_id` | string | Yes | - | Space ID in Apikit |
-| `project_id` | string | No | - | Project ID. If set, directly scopes to this project |
+| `base_url` | string | Yes | none (must be provided) | Eolink / Apikit OpenAPI base address; no third-party default is built in |
+| `api_key` | string | Yes | - | Apikit OpenAPI authentication token (`Eo-Secret-Key`) |
+| `space_id` | string | No | - | Space ID in Apikit |
 
 ---
 
@@ -131,3 +130,7 @@ When pushing a version tag (e.g. `v0.1.1`) to this repository, GitHub Actions wi
 3. Package release bundles (`eolink-<version>-<platform>.zip` with `.sha256` digests);
 4. Create a GitHub Release;
 5. Trigger the `multi-protocol-flow/mpe-plugin-registry` repository workflow to automatically synchronize the marketplace index.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

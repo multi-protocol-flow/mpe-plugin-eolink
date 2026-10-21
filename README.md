@@ -68,7 +68,7 @@ mpe-plugin-eolink/
 - **API 详情**：`GET /v3/api-management/api?project_id={project_id}&space_id={space_id}&api_id={api_id}`
 
 ### 特性支持
-1. **自动路由适配**：自动兼容 `http://uat.apikit.com/index.php` 或自定义前缀（如 `/index.php`）。
+1. **自动路由适配**：自动兼容 Apikit 标准路由前缀（如 `/index.php`），也支持任意自定义服务地址。
 2. **请求类型映射**：自动识别 `api_request_type` 整数枚举（0:POST, 1:GET, 2:PUT, 3:DELETE, 4:HEAD, 5:OPTIONS, 6:PATCH）。
 3. **参数与 Body 递归转换**：递归将 Eolink 的 JSON / Form 参数结构体转换为格式化的 JSON 示例请求体与 Query/Header 参数列表。
 
@@ -80,10 +80,9 @@ mpe-plugin-eolink/
 
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---|---|---|
-| `base_url` | string | 是 | `http://uat.apikit.com/index.php` | Eolink / Apikit 服务基础地址 |
-| `token` / `api_key` | string | 是 | - | Apikit OpenAPI 调用凭证 |
-| `space_id` | string | 是 | - | 空间 ID (Space ID) |
-| `project_id` | string | 否 | - | 项目 ID。若配置则直接进入该项目下的 API 列表 |
+| `base_url` | string | 是 | 无（必须填写） | Eolink / Apikit 服务基础地址，插件不内置任何第三方默认地址 |
+| `api_key` | string | 是 | - | Apikit OpenAPI 调用凭证（`Eo-Secret-Key`） |
+| `space_id` | string | 否 | - | 空间 ID (Space ID) |
 
 ---
 
@@ -133,3 +132,7 @@ python3 eolink.py
 3. 打包各平台独立分发包（`eolink-<version>-<platform>.zip` 及 `.sha256` 校验和）；
 4. 发布 GitHub Release；
 5. 自动触发 `multi-protocol-flow/mpe-plugin-registry` 仓库工作流，完成官方插件市场注册表的同步与更新。
+
+## 许可证
+
+MIT，详见 [LICENSE](./LICENSE)。

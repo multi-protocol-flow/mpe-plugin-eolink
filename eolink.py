@@ -5,7 +5,7 @@
 - 项目列表：GET /v3/api-management/projects?space_id={space_id}
 - API 列表：GET /v3/api-management/apis?project_id={project_id}&space_id={space_id}&page={page}&size={size}
 - API 详情：GET /v3/api-management/api?project_id={project_id}&space_id={space_id}&api_id={api_id}
-- 支持自定义 base_url（默认 http://uat.apikit.com/index.php）
+- 支持自定义 base_url（必填，不内置任何第三方默认地址）
 - 支持直接配置 project_id（直接定位项目）与 space_id
 - 自动适配 /index.php 路由前缀与 api_request_type 整数枚举（0:POST, 1:GET, 2:PUT, 3:DELETE...）
 - 自动将 API 详情完整转换为画布节点模板（请求路径、查询参数、请求头、JSON/表单请求体、认证等）
@@ -29,7 +29,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stdin, "reconfigure"):
     sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-DEFAULT_EOLINK_BASE = "http://uat.apikit.com/index.php"
+# base_url 由用户在数据源配置中提供，不再内置任何第三方服务地址。
 
 # Apikit api_request_type 整数枚举映射
 REQUEST_TYPE_MAP = {
@@ -87,7 +87,7 @@ DATASOURCE_DESCRIPTION = {
         "properties": {
             "base_url": {
                 "type": "string",
-                "title": "服务地址 (Base URL，默认 http://uat.apikit.com/index.php)",
+                "title": "服务地址 (Base URL，如 https://your-eolink-host/index.php)",
             },
             "api_key": {
                 "type": "string",
@@ -103,7 +103,7 @@ DATASOURCE_DESCRIPTION = {
                 "title": "项目 ID (project_id，可选；填入后直接定位该项目)",
             },
         },
-        "required": ["api_key"],
+        "required": ["api_key", "base_url"],
     },
     "resources": [
         {
@@ -715,7 +715,8 @@ class EolinkClient:
     def __init__(self, config: Dict[str, Any]):
         raw_base = str(config.get("base_url") or "").strip()
         if not raw_base:
-            self.base_url = DEFAULT_EOLINK_BASE
+            # 不内置任何第三方默认地址：缺省必须报错，而不是静默连到厂商测试环境。
+            self.base_url = ""
         else:
             cleaned = raw_base.rstrip("/")
             # 如果是 apikit 且未包含 /index.php，自动补全
@@ -737,12 +738,15 @@ class EolinkClient:
         }
 
     def _request(self, path: str, query: Optional[Dict[str, Any]] = None) -> Any:
+        if not self.base_url:
+            raise RuntimeError(
+                "缺少 base_url：请在数据源配置中填写 Eolink / Apikit 服务地址"
+            )
         url = f"{self.base_url}{path}"
         if query:
             filtered_query = {k: v for k, v in query.items() if v is not None}
             if filtered_query:
                 url += "?" + urllib.parse.urlencode(filtered_query)
-
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
